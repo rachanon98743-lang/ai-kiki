@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# เมนูจัดการบอท: bash /root/ai_trading_company/manage.sh
+set -uo pipefail
+DIR=/root/ai_trading_company
+ENV=/root/bot.env
+SVC=/etc/systemd/system/tradingbot.service
+
+setvar(){ # setvar KEY VALUE
+  touch "$ENV"; chmod 600 "$ENV"
+  grep -v "^$1=" "$ENV" > "$ENV.tmp" || true
+  echo "$1=$2" >> "$ENV.tmp"; mv "$ENV.tmp" "$ENV"; chmod 600 "$ENV"
+}
+mode(){ grep -o -- '--mode [a-z]*' "$SVC" | awk '{print $2}'; }
+
+while true; do
+  echo
+  echo "=== AI Trading Company | โหมดตอนนี้: $(mode) | สถานะ: $(systemctl is-active tradingbot) ==="
+  echo " 1) ใส่ Binance API key"
+  echo " 2) ใส่ Claude (Anthropic) API key"
+  echo " 3) เปลี่ยนโหมด: paper / testnet / live"
+  echo " 4) เปลี่ยนระดับความเสี่ยง: low / mid / high"
+  echo " 5) ดู log ล่าสุด"
+  echo " 6) รีสตาร์ทบอท"
+  echo " 7) อัปเดตบอทเป็นเวอร์ชันล่าสุด"
+  echo " 8) เปลี่ยนรหัสผ่านแดชบอร์ด"
+  echo " 0) ออก"
+  read -r -p "เลือก: " c
+  case "$c" in
+    1) read -r -p "API Key: " k; read -r -p "API Secret: " s
+       setvar BINANCE_API_KEY "$k"; setvar BINANCE_API_SECRET "$s"
+       systemctl restart tradingbot; echo "บันทึกแล้ว" ;;
+    2) read -r -p "Anthropic API Key: " k; setvar ANTHROPIC_API_KEY "$k"
+       systemctl restart tradingbot; echo "บันทึกแล้ว" ;;
+    3) read -r -p "โหมด (paper/testnet/live): " m
+       case "$m" in
+         paper|testnet) ;;
+         live)
+           echo "⚠️  เงินจริง: บอทจะซื้อขายในบัญชี Binance ของคุณ ขาดทุนได้จริง"
+           read -r -p "เพดานทุนที่ให้บอทใช้ (USDT): " cap
+           read -r -p 'พิมพ์ "ยืนยันเงินจริง" เพื่อยืนยัน: ' ok
+           [ "$ok" = "ยืนยันเงินจริง" ] || { echo "ยกเลิก"; continue; }
+           python3 - "$DIR/config.json" "$cap" <<'PY'
+import json,sys
+p,cap=sys.argv[1],sys.argv[2]
+c=json.load(open(p,encoding="utf-8"))
+c["live_confirmed"]="ยืนยันเงินจริง"
+try: c["max_capital_usdt"]=float(cap)
+except ValueError: pass
+json.dump(c,open(p,"w",encoding="utf-8"),ensure_ascii=False,indent=2)
+PY
+           ;;
+         *) echo "ไม่ถูกต้อง"; continue ;;
+       esac
+       sed -i "s/--mode [a-z]*/--mode $m/" "$SVC"
+       systemctl daemon-reload; systemctl restart tradingbot; echo "เปลี่ยนเป็น $m แล้ว" ;;
+    4) read -r -p "ความเสี่ยง (low/mid/high): " r
+       case "$r" in low|mid|high)
+         python3 - "$DIR/config.json" "$r" <<'PY'
+import json,sys
+p,r=sys.argv[1],sys.argv[2]
+c=json.load(open(p,encoding="utf-8")); c["risk"]=r
+json.dump(c,open(p,"w",encoding="utf-8"),ensure_ascii=False,indent=2)
+PY
+         systemctl restart tradingbot; echo "เปลี่ยนเป็น $r แล้ว" ;;
+       *) echo "ไม่ถูกต้อง" ;; esac ;;
+    5) journalctl -u tradingbot -n 40 --no-pager ;;
+    6) systemctl restart tradingbot; echo "รีสตาร์ทแล้ว" ;;
+    7) git -C "$DIR" stash -q 2>/dev/null; git -C "$DIR" pull -q && git -C "$DIR" stash pop -q 2>/dev/null
+       systemctl restart tradingbot; echo "อัปเดตแล้ว" ;;
+    8) read -r -p "รหัสใหม่ (อย่างน้อย 10 ตัว): " p
+       [ ${#p} -ge 10 ] || { echo "สั้นเกินไป"; continue; }
+       setvar DASHBOARD_PASSWORD "$p"; systemctl restart tradingbot; echo "เปลี่ยนแล้ว" ;;
+    0) exit 0 ;;
+  esac
+done

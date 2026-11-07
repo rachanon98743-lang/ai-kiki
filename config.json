@@ -1,0 +1,14 @@
+{
+  "mode": "paper",
+  "risk": "mid",
+  "paper_balance": 1000,
+  "max_capital_usdt": 100,
+  "max_daily_loss_pct": 5,
+  "cash_reserve_pct": 10,
+  "skip_bear_market": true,
+  "fee": 0.001,
+  "loop_seconds": 30,
+  "ai_enabled": true,
+  "ai_model": "claude-haiku-5-5",
+  "ai_daily_budget_usd": 0.5
+}
