@@ -23,6 +23,7 @@ from departments import (RISK_PROFILES, AccountingDept, AIAnalystDept, Execution
                          RiskDept, StrategyDept, now_th)
 import dashboard
 from notifier import LineNotifier
+import line_bot
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -61,6 +62,7 @@ class Company:
         self.status = "starting"
         self.line = LineNotifier(cfg)
         self.last_ok = time.time()
+        self.sell_queue = []  # คำสั่งขายจาก LINE รอทำในลูปหลัก
 
     def log(self, dept, msg, line=False, key=None, every=0, urgent=False):
         """line=True = ส่งข้อความนี้เข้า LINE ด้วย"""
@@ -108,6 +110,14 @@ class Company:
 
     def cycle(self):
         """1 รอบการทำงาน: เฝ้าสถานะ → (ถึงเวลา) สแกน → กลยุทธ์ → AI → ความเสี่ยง → ส่งคำสั่ง"""
+        while self.sell_queue:  # ทำคำสั่งขายที่สั่งมาจาก LINE ก่อน
+            sym = self.sell_queue.pop(0)
+            for p in self.acct.open_positions():
+                if p["symbol"] == sym:
+                    try:
+                        self.exe.sell(p, "ขายตามคำสั่ง LINE")
+                    except Exception as e:
+                        self.log("ฝ่ายเทรด", "ขาย %s ตามคำสั่ง LINE ไม่สำเร็จ: %s" % (sym, e), line=True)
         self.exe.monitor()
         eq = self.equity()
         self.acct.record_equity(eq)
@@ -263,6 +273,7 @@ def main():
         confirm_live(cfg)
     co = Company(cfg)
     threading.Thread(target=dashboard.serve, args=(co, a.port, a.host), daemon=True).start()
+    line_bot.serve(co, cfg.get("line_webhook_port", 8090))
     print("แดชบอร์ด: http://localhost:%d" % a.port)
     try:
         co.run_forever()

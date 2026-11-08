@@ -28,6 +28,7 @@ while true; do
   echo "10) ตรวจการเชื่อมต่อกระดานและยอดเงิน (ไม่ซื้อขาย)"
   echo "11) ตั้งแจ้งเตือนเข้า LINE"
   echo "12) ส่งข้อความทดสอบเข้า LINE"
+  echo "13) เปิดสั่งงานผ่านแชท LINE + ติดตั้งริชเมนู"
   echo " 0) ออก"
   read -r -p "เลือก: " c
   case "$c" in
@@ -94,6 +95,23 @@ PY
         ( set -a; . "$ENV"; set +a; cd "$DIR" && python3 main.py --test-line )
         systemctl restart tradingbot; echo "บันทึกแล้ว และรีสตาร์ทบอทแล้ว" ;;
     12) ( set -a; . "$ENV"; set +a; cd "$DIR" && python3 main.py --test-line ) ;;
+    13) grep -q '^LINE_CHANNEL_ACCESS_TOKEN=' "$ENV" || { echo "ต้องทำข้อ 11 (ตั้ง LINE) ก่อน"; continue; }
+        echo "Channel secret อยู่ที่ developers.line.biz → channel → Basic settings"
+        read -r -p "Channel secret: " sec
+        [ -n "$sec" ] || { echo "ยกเลิก"; continue; }
+        setvar LINE_CHANNEL_SECRET "$sec"
+        echo "เปิดทางให้ LINE ส่งข้อความเข้ามา (Tailscale Funnel)..."
+        echo "ถ้ามีลิงก์ขึ้นมา ให้เปิดลิงก์นั้นแล้วกดอนุญาต Funnel แล้วรันข้อ 13 ซ้ำอีกครั้ง"
+        tailscale funnel --bg --yes 8090 || { echo "เปิด Funnel ไม่สำเร็จ"; continue; }
+        DNS=$(tailscale status --json | python3 -c "import json,sys;print(json.load(sys.stdin)['Self']['DNSName'].rstrip('.'))")
+        systemctl restart tradingbot
+        ( set -a; . "$ENV"; set +a; cd "$DIR" && python3 richmenu.py )
+        echo
+        echo "✅ เกือบเสร็จ: ไปที่ developers.line.biz → channel → แท็บ Messaging API"
+        echo "   1) Webhook URL ใส่:  https://$DNS/line/webhook   แล้วกด Update และ Verify"
+        echo "   2) เปิดสวิตช์ Use webhook"
+        echo "   3) LINE Official Account features: ปิด Auto-reply messages และ Greeting messages"
+        echo "   แล้วลองพิมพ์ 'สถานะ' ในแชท LINE OA" ;;
     0) exit 0 ;;
   esac
 done
