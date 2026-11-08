@@ -55,6 +55,7 @@ systemctl enable -q tradingbot
 systemctl restart tradingbot
 
 say "5/6 ติดตั้ง Tailscale (เครือข่ายส่วนตัวสำหรับเข้าแดชบอร์ดจากมือถือ)"
+mkdir -p /etc/apt/sources.list.d /usr/share/keyrings
 command -v tailscale >/dev/null || curl -fsSL https://tailscale.com/install.sh | sh >/dev/null
 ufw allow OpenSSH >/dev/null
 ufw allow in on tailscale0 to any port 8080 >/dev/null
