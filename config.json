@@ -12,5 +12,8 @@
   "ai_enabled": true,
   "ai_model": "claude-haiku-5-5",
   "ai_daily_budget_usd": 0.5,
-  "paper_balance_th": 30000
+  "paper_balance_th": 30000,
+  "ai_monthly_budget_usd": 5,
+  "ai_daily_token_limit": 200000,
+  "ai_max_tokens_per_call": 800
 }

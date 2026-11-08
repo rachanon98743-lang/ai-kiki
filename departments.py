@@ -208,29 +208,60 @@ class AIAnalystDept:
 
     def __init__(self, cfg, acct, log):
         self.key = os.environ.get("ANTHROPIC_API_KEY", "")
-        self.model = cfg.get("ai_model", "claude-haiku-5-5")
-        self.daily_budget = float(cfg.get("ai_daily_budget_usd", 0.5))
-        self.enabled = bool(self.key) and cfg.get("ai_enabled", True)
+        self.cfg = cfg
         self.acct, self.log = acct, log
 
-    def _call(self, prompt, max_tokens=800):
+    # ค่าตั้งงบ: แก้ได้จากแดชบอร์ด (เก็บในฐานข้อมูล) ถ้าไม่ตั้ง ใช้ค่าใน config.json
+    def setting(self, k, default):
+        v = self.acct.get("set_" + k)
+        return self.cfg.get(k, default) if v is None else v
+
+    @property
+    def model(self):
+        return self.setting("ai_model", "claude-haiku-5-5")
+
+    @property
+    def enabled(self):
+        return bool(self.key) and bool(self.setting("ai_enabled", True))
+
+    def budget_status(self):
+        u = self.acct.ai_usage()
+        lim = {"day_usd": float(self.setting("ai_daily_budget_usd", 0.5)),
+               "month_usd": float(self.setting("ai_monthly_budget_usd", 5)),
+               "day_tokens": int(self.setting("ai_daily_token_limit", 200000)),
+               "max_tokens_per_call": int(self.setting("ai_max_tokens_per_call", 800))}
+        over = []
+        if u["day_usd"] >= lim["day_usd"]: over.append("งบรายวัน $%.2f" % lim["day_usd"])
+        if u["month_usd"] >= lim["month_usd"]: over.append("งบรายเดือน $%.2f" % lim["month_usd"])
+        if u["day_tokens"] >= lim["day_tokens"]: over.append("token รายวัน %d" % lim["day_tokens"])
+        return u, lim, over
+
+    def _call(self, prompt, max_tokens=800, purpose=""):
+        u, lim, over = self.budget_status()
+        if over:
+            raise RuntimeError("เกิน" + ", ".join(over))
+        max_tokens = min(max_tokens, lim["max_tokens_per_call"])
         body = json.dumps({"model": self.model, "max_tokens": max_tokens,
                            "messages": [{"role": "user", "content": prompt}]}).encode()
         req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=body, method="POST", headers={
             "x-api-key": self.key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
         with urllib.request.urlopen(req, timeout=60) as r:
             data = json.loads(r.read())
-        u = data.get("usage", {})
+        us = data.get("usage", {})
+        tin, tout = us.get("input_tokens", 0), us.get("output_tokens", 0)
         pin, pout = self.PRICES.get(self.model, (4.0, 20.0))
-        cost = u.get("input_tokens", 0) / 1e6 * pin + u.get("output_tokens", 0) / 1e6 * pout
+        cost = tin / 1e6 * pin + tout / 1e6 * pout
+        text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
         self.acct.add_ai_cost(cost)
-        return "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+        self.acct.add_ai_call(purpose, self.model, tin, tout, cost, text[:600])
+        return text
 
     def review(self, proposals, regime):
         if not self.enabled or not proposals:
             return proposals
-        if self.acct.ai_cost_today() >= self.daily_budget:
-            self.log(self.name, "ใช้งบ AI วันนี้ครบ $%.2f แล้ว อนุมัติตามกฎอย่างเดียว" % self.daily_budget)
+        _, _, over = self.budget_status()
+        if over:
+            self.log(self.name, "ถึงเพดาน (%s) หยุดเรียก AI อนุมัติตามกฎอย่างเดียว" % ", ".join(over))
             return proposals
         brief = [{k: (round(v, 4) if isinstance(v, float) else v) for k, v in p.items()} for p in proposals[:8]]
         prompt = (
@@ -240,7 +271,7 @@ class AIAnalystDept:
             "ตอบเป็น JSON อย่างเดียว รูปแบบ: {\"decisions\":[{\"symbol\":\"XXXUSDT\",\"approve\":true,\"reason\":\"สั้นๆ ภาษาไทย\"}]}"
         ) % (regime, json.dumps(brief, ensure_ascii=False))
         try:
-            text = self._call(prompt)
+            text = self._call(prompt, purpose="ตรวจข้อเสนอซื้อ %d ตัว" % len(brief))
             j = json.loads(text[text.index("{"):text.rindex("}") + 1])
             dec = {d["symbol"]: d for d in j.get("decisions", [])}
         except Exception as e:
@@ -257,11 +288,11 @@ class AIAnalystDept:
         return approved
 
     def daily_letter(self, summary):
-        if not self.enabled or self.acct.ai_cost_today() >= self.daily_budget:
+        if not self.enabled or self.budget_status()[2]:
             return None
         try:
-            return self._call("เขียนรายงานผู้บริหารสั้นๆ ภาษาไทย 5 บรรทัด จากข้อมูลพอร์ตเทรดคริปโตนี้ "
-                              "บอกสิ่งที่ได้ผล สิ่งที่ควรระวัง ห้ามแนะนำเพิ่มความเสี่ยง:\n" + json.dumps(summary, ensure_ascii=False), 500)
+            return self._call(purpose="รายงานประจำวัน", prompt="เขียนรายงานผู้บริหารสั้นๆ ภาษาไทย 5 บรรทัด จากข้อมูลพอร์ตเทรดคริปโตนี้ "
+                              "บอกสิ่งที่ได้ผล สิ่งที่ควรระวัง ห้ามแนะนำเพิ่มความเสี่ยง:\n" + json.dumps(summary, ensure_ascii=False), max_tokens=500)
         except Exception:
             return None
 
@@ -392,6 +423,7 @@ class AccountingDept:
             exit REAL, proceeds REAL, pnl REAL, reason TEXT, closed TEXT);
         CREATE TABLE IF NOT EXISTS equity(t TEXT, value REAL);
         CREATE TABLE IF NOT EXISTS ai_cost(day TEXT PRIMARY KEY, usd REAL);
+        CREATE TABLE IF NOT EXISTS ai_calls(t TEXT, purpose TEXT, model TEXT, tin INTEGER, tout INTEGER, usd REAL, result TEXT);
         CREATE TABLE IF NOT EXISTS logs(t TEXT, dept TEXT, msg TEXT);
         CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
         """)
@@ -427,6 +459,32 @@ class AccountingDept:
     def ai_cost_today(self):
         r = self.db.execute("SELECT usd FROM ai_cost WHERE day=?", (now_th().date().isoformat(),)).fetchone()
         return r["usd"] if r else 0.0
+
+    def add_ai_call(self, purpose, model, tin, tout, usd, result):
+        self.db.execute("INSERT INTO ai_calls VALUES(?,?,?,?,?,?,?)",
+                        (now_th().isoformat(timespec="seconds"), purpose, model, tin, tout, usd, result))
+        self.db.commit()
+
+    def ai_usage(self):
+        d = now_th().date().isoformat()
+        m = d[:7]
+        r1 = self.db.execute("SELECT COALESCE(SUM(usd),0) u, COALESCE(SUM(tin+tout),0) t, COUNT(*) n FROM ai_calls WHERE t LIKE ?", (d + "%",)).fetchone()
+        r2 = self.db.execute("SELECT COALESCE(SUM(usd),0) u, COALESCE(SUM(tin+tout),0) t FROM ai_calls WHERE t LIKE ?", (m + "%",)).fetchone()
+        return {"day_usd": max(r1["u"], self.ai_cost_today()), "day_tokens": r1["t"], "day_calls": r1["n"],
+                "month_usd": r2["u"], "month_tokens": r2["t"]}
+
+    def recent_ai_calls(self, n=30):
+        return [dict(r) for r in self.db.execute("SELECT * FROM ai_calls ORDER BY rowid DESC LIMIT ?", (n,))]
+
+    def dept_activity(self):
+        """การทำงานล่าสุดของแต่ละแผนก"""
+        rows = self.db.execute("SELECT dept, MAX(t) t, COUNT(*) n FROM logs WHERE t >= ? GROUP BY dept",
+                               (now_th().date().isoformat(),)).fetchall()
+        out = {}
+        for r in rows:
+            last = self.db.execute("SELECT msg FROM logs WHERE dept=? ORDER BY rowid DESC LIMIT 1", (r["dept"],)).fetchone()
+            out[r["dept"]] = {"t": r["t"], "today": r["n"], "last": last["msg"] if last else ""}
+        return out
 
     def log(self, dept, msg):
         self.db.execute("INSERT INTO logs VALUES(?,?,?)", (now_th().isoformat(timespec="seconds"), dept, msg))
