@@ -67,6 +67,12 @@ details summary{cursor:pointer;color:#58a6ff}pre{white-space:pre-wrap;font-size:
 <div class="sc"><table><thead><tr><th>เวลา</th><th>งาน</th><th>token เข้า/ออก</th><th>ค่าใช้จ่าย</th></tr></thead><tbody id="calls"></tbody></table></div>
 </div>
 
+<div class="card"><h3>💬 แจ้งเตือน LINE</h3>
+<div id="lineState" class="m"></div><div id="lineBar"></div>
+<p><button id="ltest">ส่งข้อความทดสอบ</button> <span id="lmsg" class="m"></span></p>
+<p class="m" style="font-size:12px">แจ้งเมื่อ: บอทเริ่มงาน · ซื้อ/ขายทุกไม้ · ขาดทุนถึงเพดาน · บอทมีปัญหา/ค้าง · สรุปทุกคืน 3 ทุ่ม<br>LINE OA แพ็กฟรีส่งได้ 300 ข้อความ/เดือน ใกล้หมดแล้วจะส่งเฉพาะเรื่องด่วน</p>
+</div>
+
 <div class="card"><h3>สถานะที่ถืออยู่</h3><div class="sc"><table><thead><tr><th>เหรียญ</th><th>จำนวน</th><th>ราคาซื้อ</th><th>ทุน</th><th>SL</th><th>TP</th><th>เหตุผล</th></tr></thead><tbody id="pos"></tbody></table></div></div>
 <div class="card"><h3>ผลวิจัยล่าสุด</h3><div class="sc"><table><thead><tr><th>เหรียญ</th><th>ราคา</th><th>24ชม.</th><th>RSI</th><th>คะแนน</th><th>เหตุผล</th></tr></thead><tbody id="res"></tbody></table></div></div>
 <div class="card"><h3>ประวัติการเทรด</h3><div class="sc"><table><thead><tr><th>เหรียญ</th><th>ซื้อ</th><th>ขาย</th><th>กำไร</th><th>เหตุผล</th><th>ปิดเมื่อ</th></tr></thead><tbody id="hist"></tbody></table></div></div>
@@ -95,6 +101,8 @@ $('aiState').innerHTML=!A.has_key?'⚪ ยังไม่ได้ใส่ Clau
 $('bars').innerHTML=bar('ค่าใช้จ่ายวันนี้',u.day_usd,l.day_usd,v=>'$'+f(v,4))+bar('ค่าใช้จ่ายเดือนนี้',u.month_usd,l.month_usd,v=>'$'+f(v,4))+bar('token วันนี้',u.day_tokens,l.day_tokens,v=>f(v,0));
 if(!formLoaded){$('f_en').value=A.enabled_setting?'1':'0';$('f_model').value=A.model;$('f_day').value=l.day_usd;$('f_month').value=l.month_usd;$('f_tok').value=l.day_tokens;$('f_call').value=l.max_tokens_per_call;formLoaded=true;}
 $('calls').innerHTML=A.calls.map(x=>`<tr><td class="m">${esc(x.t.slice(5,16).replace('T',' '))}</td><td style="text-align:left;white-space:normal"><details><summary>${esc(x.purpose)}</summary><pre>${esc(x.result)}</pre></details></td><td>${f(x.tin,0)} / ${f(x.tout,0)}</td><td>$${f(x.usd,5)}</td></tr>`).join('')||'<tr><td class="m">ยังไม่มี</td></tr>';
+const LN=D.line;$('lineState').innerHTML=LN.enabled?'🟢 เชื่อม LINE แล้ว':'⚪ ยังไม่ได้เชื่อม LINE: ใส่ token และ user ID ที่เมนู manage.sh ข้อ 11';
+$('lineBar').innerHTML=bar('ข้อความเดือนนี้',LN.count,LN.limit,v=>f(v,0));
 $('pos').innerHTML=D.positions.map(p=>`<tr><td>${esc(p.symbol)}</td><td>${f(p.qty,6)}</td><td>${f(p.entry,6)}</td><td>${f(p.cost)}</td><td>${f(p.sl,6)}</td><td>${f(p.tp,6)}</td><td class="m">${esc(p.why)}</td></tr>`).join('')||'<tr><td class="m">ยังไม่มี</td></tr>';
 $('res').innerHTML=D.research.map(r=>`<tr><td>${esc(r.symbol)}</td><td>${f(r.price,6)}</td><td class="${c(r.chg24)}">${f(r.chg24)}%</td><td>${f(r.rsi,0)}</td><td><b>${r.score}</b></td><td class="m">${esc(r.why.join(', '))}</td></tr>`).join('')||'<tr><td class="m">ยังไม่สแกน</td></tr>';
 $('hist').innerHTML=D.closed.map(p=>`<tr><td>${esc(p.symbol)}</td><td>${f(p.entry,6)}</td><td>${f(p.exit,6)}</td><td class="${c(p.pnl)}">${f(p.pnl)}</td><td>${esc(p.reason)}</td><td class="m">${esc((p.closed||'').slice(5,16))}</td></tr>`).join('')||'<tr><td class="m">ยังไม่มี</td></tr>';
@@ -104,6 +112,7 @@ $('stop').onclick=async()=>{await fetch('/api/toggle-stop',{method:'POST'});load
 $('save').onclick=async()=>{const body={ai_enabled:$('f_en').value==='1',ai_model:$('f_model').value,ai_daily_budget_usd:+$('f_day').value,ai_monthly_budget_usd:+$('f_month').value,ai_daily_token_limit:+$('f_tok').value,ai_max_tokens_per_call:+$('f_call').value};
  const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json().catch(()=>({}));
  $('saveMsg').textContent=r.ok?'✅ บันทึกแล้ว':'❌ '+(j.error||'บันทึกไม่ได้');formLoaded=false;load();};
+$('ltest').onclick=async()=>{$('lmsg').textContent='กำลังส่ง...';const r=await fetch('/api/line-test',{method:'POST'});const j=await r.json().catch(()=>({}));$('lmsg').textContent=j.msg||'ผิดพลาด';load();};
 load();setInterval(load,10000);
 </script></body></html>"""
 
@@ -200,6 +209,9 @@ def serve(company, port, host="127.0.0.1"):
                               "enabled_setting": bool(co.ai.setting("ai_enabled", True)), "model": co.ai.model,
                               "usage": usage, "limits": limits, "over": over, "calls": co.acct.recent_ai_calls(30)}
                 data["activity"] = co.acct.dept_activity()
+                st = co.line._load()
+                data["line"] = {"enabled": co.line.enabled, "limit": co.line.monthly_limit,
+                                "count": st.get("count", 0) if st.get("month") == time.strftime("%Y-%m") else 0}
                 data["depts"] = [{"icon": i, "name": n, "note": ("Claude " + co.ai.model.split("-")[1].title()) if "AI" in n and co.ai.enabled else ("ปิดอยู่" if "AI" in n else "")} for i, n in DEPTS]
                 self._send(200, json.dumps(data, ensure_ascii=False, default=str), "application/json; charset=utf-8")
             else:
@@ -254,6 +266,14 @@ def serve(company, port, host="127.0.0.1"):
                     company.acct.set("set_" + k, v)
                 company.log("CEO", "ปรับงบ AI จากแดชบอร์ด: " + ", ".join("%s=%s" % kv for kv in clean.items()))
                 return self._send(200, "{}", "application/json")
+            if self.path == "/api/line-test":
+                if not company.line.enabled:
+                    msg = "ยังไม่ได้ตั้ง LINE (manage.sh ข้อ 11)"
+                elif company.line.send("🔔 ทดสอบแจ้งเตือนจากแดชบอร์ด", key="dash_test", every_sec=30):
+                    msg = "✅ ส่งแล้ว ดูใน LINE ได้เลย"
+                else:
+                    msg = "❌ ส่งไม่สำเร็จ: ตรวจ token / user ID และต้องเพิ่มเพื่อน LINE OA ก่อน (หรือกดถี่เกิน 30 วินาที)"
+                return self._send(200, json.dumps({"msg": msg}, ensure_ascii=False), "application/json; charset=utf-8")
             if self.path == "/api/toggle-stop":
                 if os.path.exists("STOP"):
                     os.remove("STOP")
