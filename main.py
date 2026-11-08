@@ -22,6 +22,7 @@ from binance_client import Binance, BinanceError
 from departments import (RISK_PROFILES, AccountingDept, AIAnalystDept, ExecutionDept, ResearchDept,
                          RiskDept, StrategyDept, now_th)
 import dashboard
+from notifier import LineNotifier
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -58,11 +59,19 @@ class Company:
         self.last_scan = 0
         self.last_research = []
         self.status = "starting"
+        self.line = LineNotifier(cfg)
+        self.last_ok = time.time()
 
-    def log(self, dept, msg):
-        line = "[%s] %-20s %s" % (now_th().strftime("%H:%M:%S"), dept, msg)
-        print(line, flush=True)
+    def log(self, dept, msg, line=False, key=None, every=0, urgent=False):
+        """line=True = ส่งข้อความนี้เข้า LINE ด้วย"""
+        text = "[%s] %-20s %s" % (now_th().strftime("%H:%M:%S"), dept, msg)
+        print(text, flush=True)
         self.acct.log(dept, msg)
+        if line:
+            self.line.send("%s: %s" % (dept, msg), key=key, every_sec=every, urgent=urgent)
+
+    def mode_label(self):
+        return {"paper": "เงินจำลอง", "testnet": "testnet", "live": "เงินจริง"}.get(self.mode, self.mode)
 
     def equity(self):
         pos = self.acct.open_positions()
@@ -92,6 +101,10 @@ class Company:
         if self.mode != "paper":
             self.log("CEO", "เงิน %s ในบัญชี: %.2f" % (self.ex.quote, self.ex.usdt_free()))
         self.status = "running"
+        # กันสแปมตอนบอทรีสตาร์ตซ้ำๆ: แจ้งว่าเริ่มงานไม่เกินครึ่งชั่วโมงละครั้ง
+        self.line.send("✅ บอทเริ่มทำงานแล้ว\nโหมด: %s | ความเสี่ยง: %s\nเงินในบัญชี: %.2f %s\nถือไม้อยู่: %d" % (
+            self.mode_label(), RISK_PROFILES[self.risk]["name"], self.ex.usdt_free(), self.ex.quote,
+            len(self.acct.open_positions())), key="start", every_sec=1800)
 
     def cycle(self):
         """1 รอบการทำงาน: เฝ้าสถานะ → (ถึงเวลา) สแกน → กลยุทธ์ → AI → ความเสี่ยง → ส่งคำสั่ง"""
@@ -136,19 +149,57 @@ class Company:
         if letter:
             self.log("CEO", "บทสรุปจาก AI: " + letter.replace("\n", " "))
         self.acct.set("report_day", today)
+        day0 = self.acct.get("day_start_" + today) or s["equity"]
+        chg = (s["equity"] / day0 - 1) * 100 if day0 else 0
+        self.line.send("📊 สรุปประจำวัน %s (%s)\nมูลค่าพอร์ต: %.2f %s (วันนี้ %+.2f%%)\nกำไร/ขาดทุนสะสม: %+.2f\n"
+                       "เทรดแล้ว %d ไม้ ชนะ %s%% | ถืออยู่ %d ไม้\nตลาด: %s\n(ได้ข้อความนี้ทุกคืน = บอทยังทำงานอยู่)%s" % (
+                           today, self.mode_label(), s["equity"], self.ex.quote, chg, s["realized_pnl"],
+                           s["trades"], s["win_rate"], s["open"], self.regime,
+                           ("\n\n" + letter[:1500]) if letter else ""), key="report", every_sec=3600)
+
+    def unguarded_note(self):
+        try:
+            n = len([p for p in self.acct.open_positions() if not p["oco_id"]])
+        except Exception:
+            return ""
+        return ("\n⚠️ มี %d ไม้ที่บอทต้องเฝ้า stop loss เอง ถ้าแก้ไม่ได้ให้เข้าแอป Binance ขายเอง" % n) if n else ""
+
+    def watchdog(self):
+        """ถ้าลูปค้างนานเกิน 15 นาที (เช่นเน็ตค้าง) แจ้ง LINE แล้วปิดโปรแกรม ให้ systemd เปิดใหม่"""
+        limit = max(900, self.cfg.get("loop_seconds", 30) * 10)
+        while True:
+            time.sleep(60)
+            if time.time() - self.last_ok > limit:
+                self.line.send("🔄 บอทค้างเกิน %d นาที กำลังรีสตาร์ตตัวเอง%s" % (limit // 60, self.unguarded_note()),
+                               key="hang", every_sec=3600, urgent=True)
+                os._exit(1)
 
     def run_forever(self):
-        self.start()
+        try:
+            self.start()
+        except Exception as e:
+            self.line.send("❌ บอทเริ่มทำงานไม่ได้: %s\nระบบจะลองใหม่เองทุก 30 วินาที%s" % (e, self.unguarded_note()),
+                           key="start_err", every_sec=3600, urgent=True)
+            raise
+        self.last_ok = time.time()
+        threading.Thread(target=self.watchdog, daemon=True).start()
+        fails = 0
         while True:
             try:
                 self.cycle()
-            except BinanceError as e:
-                self.log("CEO", "Binance ผิดพลาด: %s" % e)
-                time.sleep(30)
+                if fails >= 3:
+                    self.line.send("✅ บอทกลับมาทำงานปกติแล้ว", key="recovered", every_sec=600)
+                fails = 0
             except Exception as e:
-                self.log("CEO", "ผิดพลาด: %s" % e)
-                traceback.print_exc()
+                fails += 1
+                self.log("CEO", ("Binance ผิดพลาด: %s" if isinstance(e, BinanceError) else "ผิดพลาด: %s") % e)
+                if not isinstance(e, BinanceError):
+                    traceback.print_exc()
+                if fails == 3:  # พลาด 3 รอบติด (ไม่ใช่สะดุดครั้งเดียว) ค่อยแจ้ง
+                    self.line.send("⚠️ บอทมีปัญหาติดกัน 3 รอบ: %s%s" % (e, self.unguarded_note()),
+                                   key="err", every_sec=3600, urgent=True)
                 time.sleep(30)
+            self.last_ok = time.time()
             time.sleep(self.cfg.get("loop_seconds", 30))
 
 
@@ -179,6 +230,7 @@ def main():
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--check", action="store_true", help="ตรวจการเชื่อมต่อกระดานและยอดเงิน โดยไม่ซื้อขาย")
     ap.add_argument("--exchange", choices=["binance", "binance_th"])
+    ap.add_argument("--test-line", action="store_true", help="ส่งข้อความทดสอบเข้า LINE")
     ap.add_argument("--host", default="127.0.0.1", help="0.0.0.0 = เปิดให้เครื่องอื่นเข้าได้ (ต้องตั้ง DASHBOARD_PASSWORD)")
     a = ap.parse_args()
     cfg = load_config(a.config)
@@ -189,6 +241,15 @@ def main():
         cfg["risk"] = a.risk
     if a.exchange:
         cfg["exchange"] = a.exchange
+    if a.test_line:
+        n = LineNotifier(cfg)
+        if not n.enabled:
+            print("❌ ยังไม่ได้ตั้ง LINE_CHANNEL_ACCESS_TOKEN / LINE_USER_ID")
+        elif n.send("🔔 ทดสอบแจ้งเตือน: ถ้าเห็นข้อความนี้ แปลว่าตั้งค่า LINE ถูกต้องแล้ว"):
+            print("✅ ส่งแล้ว ดูใน LINE ได้เลย")
+        else:
+            print("❌ ส่งไม่สำเร็จ: ตรวจ token / user ID และต้องกดเพิ่มเพื่อน LINE OA ของบอทก่อน")
+        return
     if a.check:
         try:
             ex = Binance(cfg["mode"], os.environ.get("BINANCE_API_KEY", ""), os.environ.get("BINANCE_API_SECRET", ""),

@@ -34,22 +34,26 @@ else
 fi
 chmod 600 "$ENV"
 
-say "4/6 ตั้งให้บอทรันเองตลอด 24 ชม. (เริ่มที่โหมดเงินจำลอง)"
-if [ ! -f /etc/systemd/system/tradingbot.service ]; then
-cat > /etc/systemd/system/tradingbot.service <<EOF
+say "4/6 ตั้งให้บอทรันเองตลอด 24 ชม. (ติดตั้งใหม่เริ่มที่โหมดเงินจำลอง, ติดตั้งซ้ำใช้โหมดเดิม)"
+SVC=/etc/systemd/system/tradingbot.service
+MODE=paper
+[ -f "$SVC" ] && MODE=$(grep -o -- '--mode [a-z]*' "$SVC" | awk '{print $2}') && [ -n "$MODE" ] || MODE=${MODE:-paper}
+cat > "$SVC" <<EOF
 [Unit]
 Description=AI Trading Company
+Wants=network-online.target
 After=network-online.target
+# รีสตาร์ตได้ไม่จำกัดครั้ง (ไม่ยอมแพ้แม้เน็ตล่มนาน)
+StartLimitIntervalSec=0
 [Service]
 WorkingDirectory=$DIR
 EnvironmentFile=$ENV
-ExecStart=/usr/bin/python3 main.py --host 0.0.0.0 --mode paper
+ExecStart=/usr/bin/python3 main.py --host 0.0.0.0 --mode $MODE
 Restart=always
 RestartSec=30
 [Install]
 WantedBy=multi-user.target
 EOF
-fi
 systemctl daemon-reload
 systemctl enable -q tradingbot
 systemctl restart tradingbot
@@ -69,7 +73,7 @@ say "6/6 เสร็จแล้ว"
 IP=$(tailscale ip -4 | head -1)
 cat <<EOF
 
-  ✅ บอทกำลังทำงาน (โหมดเงินจำลอง)
+  ✅ บอทกำลังทำงาน (โหมด $MODE) และจะเปิดเองทุกครั้งที่ VPS รีบูตหรือบอทล่ม
 
   บนมือถือ:
     1) ติดตั้งแอป Tailscale แล้วล็อกอินบัญชีเดียวกัน กดเปิดการเชื่อมต่อ
@@ -77,5 +81,5 @@ cat <<EOF
     3) ใส่รหัสผ่านแดชบอร์ด
 
   คำสั่งที่ใช้บ่อย:
-    bash $DIR/manage.sh          เมนูจัดการบอท (ใส่ API key / เปลี่ยนโหมด / ดู log)
+    bash $DIR/manage.sh          เมนูจัดการบอท (ใส่ API key / เปลี่ยนโหมด / ดู log / ตั้งแจ้งเตือน LINE ข้อ 11)
 EOF

@@ -26,6 +26,8 @@ while true; do
   echo " 8) เปลี่ยนรหัสผ่านแดชบอร์ด"
   echo " 9) เลือกกระดาน: binance_th (บัญชีไทย) / binance (binance.com)"
   echo "10) ตรวจการเชื่อมต่อกระดานและยอดเงิน (ไม่ซื้อขาย)"
+  echo "11) ตั้งแจ้งเตือนเข้า LINE"
+  echo "12) ส่งข้อความทดสอบเข้า LINE"
   echo " 0) ออก"
   read -r -p "เลือก: " c
   case "$c" in
@@ -85,6 +87,13 @@ PY
          systemctl restart tradingbot; echo "เปลี่ยนเป็น $e แล้ว" ;;
        *) echo "ไม่ถูกต้อง" ;; esac ;;
     10) ( set -a; . "$ENV"; set +a; cd "$DIR" && python3 main.py --check --mode "$(mode)" ) ;;
+    11) echo "ต้องมี LINE OA + Messaging API ก่อน (ดูวิธีใน README หัวข้อ แจ้งเตือนเข้า LINE)"
+        read -r -p "Channel access token (long-lived): " t; read -r -p "Your user ID (ขึ้นต้นด้วย U): " u
+        [ -n "$t" ] && [ -n "$u" ] || { echo "ยกเลิก"; continue; }
+        setvar LINE_CHANNEL_ACCESS_TOKEN "$t"; setvar LINE_USER_ID "$u"
+        ( set -a; . "$ENV"; set +a; cd "$DIR" && python3 main.py --test-line )
+        systemctl restart tradingbot; echo "บันทึกแล้ว และรีสตาร์ทบอทแล้ว" ;;
+    12) ( set -a; . "$ENV"; set +a; cd "$DIR" && python3 main.py --test-line ) ;;
     0) exit 0 ;;
   esac
 done

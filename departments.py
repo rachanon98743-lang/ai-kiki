@@ -318,7 +318,8 @@ class RiskDept:
             return False
         if equity_day_start > 0 and equity_now / equity_day_start - 1 <= -self.max_daily_loss:
             if not self.halted:
-                self.log(self.name, "ขาดทุนวันนี้เกิน %.0f%% หยุดเปิดไม้ใหม่ถึงพรุ่งนี้" % (self.max_daily_loss * 100))
+                self.log(self.name, "🛑 ขาดทุนวันนี้เกิน %.0f%% หยุดเปิดไม้ใหม่ถึงพรุ่งนี้ (ไม้เดิมยังมี stop loss คุม)" % (
+                    self.max_daily_loss * 100), line=True, key="daily_halt", every=3600 * 6, urgent=True)
             self.halted = True
             return False
         self.halted = False
@@ -372,8 +373,8 @@ class ExecutionDept:
         except Exception as e:
             self.log(self.name, "ตั้ง OCO บนกระดานไม่สำเร็จ (%s) จะเฝ้าราคาเองแทน" % e)
         pid = self.acct.open_position(s, qty, px, spent, sl, tp, oco, risk, "; ".join(o["why"]))
-        self.log(self.name, "ซื้อ %s %.6g @ %.6g ใช้ %.2f | SL %.6g TP %.6g %s" % (
-            s, qty, px, spent, sl, tp, "(OCO บนกระดาน)" if oco else "(เฝ้าเอง)"))
+        self.log(self.name, "🟢 ซื้อ %s %.6g @ %.6g ใช้ %.2f | SL %.6g TP %.6g %s" % (
+            s, qty, px, spent, sl, tp, "(OCO บนกระดาน)" if oco else "(เฝ้าเอง)"), line=True)
         return pid
 
     def monitor(self):
@@ -389,7 +390,7 @@ class ExecutionDept:
                         got, exit_px, typ = self.ex.oco_fill(p["oco_id"])
                         reason = "ทำกำไร" if "LIMIT_MAKER" in typ else "ตัดขาดทุน"
                         self.acct.close_position(p["id"], exit_px, got, reason)
-                        self.log(self.name, "%s %s @ %.6g ได้ %.2f" % (reason, s, exit_px, got))
+                        self.log(self.name, self.exit_msg(reason, s, exit_px, got, p["cost"]), line=True)
                 except Exception as e:
                     self.log(self.name, "เช็ก OCO %s ไม่ได้: %s" % (s, e))
                 continue
@@ -407,7 +408,13 @@ class ExecutionDept:
                 self.log(self.name, "ยกเลิก OCO ไม่ได้ (%s)" % e)
         got, px = self.ex.market_sell(p["symbol"], p["qty"])
         self.acct.close_position(p["id"], px, got, reason)
-        self.log(self.name, "%s %s @ %.6g ได้ %.2f" % (reason, p["symbol"], px, got))
+        self.log(self.name, self.exit_msg(reason, p["symbol"], px, got, p["cost"]), line=True)
+
+    @staticmethod
+    def exit_msg(reason, symbol, px, got, cost):
+        pnl = got - cost
+        return "%s %s %s @ %.6g ได้ %.2f (%+.2f, %+.1f%%)" % (
+            "💰" if pnl > 0 else "🔻", reason, symbol, px, got, pnl, pnl / cost * 100 if cost else 0)
 
 
 # ===================================================================== 6. Accounting
