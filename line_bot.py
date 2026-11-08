@@ -219,12 +219,33 @@ def serve(company, port=8090):
         def do_GET(self):
             self._ok(404)
 
+        def _read_body(self):
+            """รองรับทั้ง Content-Length และ chunked (บาง proxy ส่งแบบ chunked)"""
+            if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+                out = b""
+                while len(out) < 1_000_000:
+                    size = int(self.rfile.readline().split(b";")[0].strip() or b"0", 16)
+                    if size == 0:
+                        self.rfile.readline()
+                        break
+                    out += self.rfile.read(size)
+                    self.rfile.readline()
+                return out
+            n = min(int(self.headers.get("Content-Length", 0) or 0), 1_000_000)
+            return self.rfile.read(n) if n else b""
+
         def do_POST(self):
             if self.path.rstrip("/") not in ("/line/webhook", "/webhook"):
                 return self._ok(404)
-            n = min(int(self.headers.get("Content-Length", 0) or 0), 1_000_000)
-            body = self.rfile.read(n)
-            if not bot.verify(body, self.headers.get("X-Line-Signature")):
+            body = self._read_body()
+            sig = self.headers.get("X-Line-Signature")
+            if not bot.verify(body, sig):
+                now = time.time()
+                if now - bot.__dict__.get("_last_bad", 0) > 60:  # log ไม่เกินนาทีละครั้ง
+                    bot._last_bad = now
+                    company.log("CEO", "ปฏิเสธ webhook: ลายเซ็นไม่ตรง (มีลายเซ็น=%s, ข้อมูล %d ไบต์, secret ยาว %d ตัว%s)" % (
+                        "ใช่" if sig else "ไม่", len(body), len(bot.secret),
+                        "" if len(bot.secret) == 32 else " ⚠️ ปกติ Channel secret ยาว 32 ตัว น่าจะใส่ผิดตัว"))
                 return self._ok(401)
             self._ok(200)
             try:
