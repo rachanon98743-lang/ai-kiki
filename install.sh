@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # ติดตั้ง AI Trading Company บน VPS Ubuntu ในคำสั่งเดียว
-#   curl -fsSL https://raw.githubusercontent.com/rachanon98743-lang/ai-kiki/main/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/rachanon98743-lang/sale/kiki-bot/install.sh | sudo bash
 set -euo pipefail
 
-REPO="https://github.com/rachanon98743-lang/ai-kiki.git"
+REPO="https://github.com/rachanon98743-lang/sale.git"
+BRANCH=kiki-bot
 DIR=/root/ai_trading_company
 ENV=/root/bot.env
 TTY=/dev/tty
@@ -19,7 +20,7 @@ apt-get update -qq
 apt-get install -y -qq python3 git curl ufw >/dev/null
 
 say "2/6 ดาวน์โหลดบอท"
-if [ -d "$DIR/.git" ]; then git -C "$DIR" pull -q; else rm -rf "$DIR"; git clone -q "$REPO" "$DIR"; fi
+if [ -d "$DIR/.git" ]; then git -C "$DIR" pull -q; else rm -rf "$DIR"; git clone -q -b "$BRANCH" --single-branch "$REPO" "$DIR"; fi
 
 say "3/6 ตั้งรหัสผ่านแดชบอร์ด"
 if [ -f "$ENV" ] && grep -q '^DASHBOARD_PASSWORD=' "$ENV"; then
