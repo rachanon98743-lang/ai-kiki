@@ -19,6 +19,7 @@ import urllib.request
 LIVE_URL = "https://api.binance.com"
 TESTNET_URL = "https://testnet.binance.vision"
 DATA_URL = "https://data-api.binance.vision"  # ข้อมูลราคาสาธารณะ
+TH_URL = "https://api.binance.th"               # Binance TH (Gulf Binance) สำหรับบัญชีคนไทย
 
 
 class BinanceError(Exception):
@@ -33,16 +34,28 @@ def _round_down(x, step):
 
 
 class Binance:
-    def __init__(self, mode="paper", api_key="", api_secret="", fee=0.001, paper_balance=1000.0):
+    def __init__(self, mode="paper", api_key="", api_secret="", fee=0.001, paper_balance=1000.0,
+                 exchange="binance", quote=None):
         self.mode = mode
+        self.exchange = exchange
+        self.th = exchange == "binance_th"
         self.key, self.secret = api_key, api_secret
-        self.base = {"live": LIVE_URL, "testnet": TESTNET_URL}.get(mode, LIVE_URL)
-        self.data_base = TESTNET_URL if mode == "testnet" else DATA_URL
+        if self.th:
+            if mode == "testnet":
+                raise BinanceError("Binance TH ไม่มี testnet ใช้โหมด paper หรือ live")
+            self.base = self.data_base = TH_URL
+            self.v = "/api/v1"
+            self.quote = quote or "THB"
+        else:
+            self.base = {"live": LIVE_URL, "testnet": TESTNET_URL}.get(mode, LIVE_URL)
+            self.data_base = TESTNET_URL if mode == "testnet" else DATA_URL
+            self.v = "/api/v3"
+            self.quote = quote or "USDT"
         self.fee = fee
         self.time_offset = 0
         self.filters = {}
         # สมุดบัญชีจำลองสำหรับโหมด paper
-        self.paper = {"USDT": paper_balance}
+        self.paper = {self.quote: paper_balance}
         self._oid = 0
         if mode in ("live", "testnet") and not (api_key and api_secret):
             raise BinanceError("โหมด %s ต้องตั้ง BINANCE_API_KEY และ BINANCE_API_SECRET" % mode)
@@ -87,12 +100,16 @@ class Binance:
         raise BinanceError("ถูกจำกัดความถี่ (rate limit) ซ้ำหลายครั้ง")
 
     def public(self, path, params=None):
+        path = path.replace("/api/v3", self.v)
         try:
             return self._request("GET", path, params, base=self.data_base)
         except BinanceError:
-            if self.mode == "testnet":
+            if self.mode == "testnet" or self.th:
                 raise
             return self._request("GET", path, params, base=LIVE_URL)
+
+    def private(self, method, path, params=None):
+        return self._request(method, path.replace("/api/v3", self.v), params, signed=True)
 
     # ------------------------------------------------------------ market data
     def sync_time(self):
@@ -102,7 +119,7 @@ class Binance:
     def load_filters(self):
         info = self.public("/api/v3/exchangeInfo")
         for s in info["symbols"]:
-            if s.get("status") != "TRADING" or s.get("quoteAsset") != "USDT":
+            if s.get("status") != "TRADING" or s.get("quoteAsset") != self.quote:
                 continue
             f = {x["filterType"]: x for x in s["filters"]}
             lot = f.get("LOT_SIZE", {})
@@ -113,18 +130,33 @@ class Binance:
                 "step": float(lot.get("stepSize", 0) or 0),
                 "min_qty": float(lot.get("minQty", 0) or 0),
                 "tick": float(price.get("tickSize", 0) or 0),
-                "min_notional": float(notional.get("minNotional", 5) or 5),
-                "oco": bool(s.get("ocoAllowed")),
+                "min_notional": float(notional.get("minNotional") or (5 if self.quote == "USDT" else 100)),
+                "oco": bool(s.get("ocoAllowed")) and not self.th,
             }
         return self.filters
 
     def tickers_24h(self):
-        return self.public("/api/v3/ticker/24hr")
+        if not self.th:
+            return self.public("/api/v3/ticker/24hr")
+        out = []  # Binance TH ต้องขอทีละเหรียญ
+        for sym in self.filters:
+            try:
+                out.append(self.public("/api/v3/ticker/24hr", {"symbol": sym}))
+            except BinanceError:
+                pass
+            time.sleep(0.05)
+        return out
 
     def klines(self, symbol, interval, limit=250):
         return self.public("/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": limit})
 
     def prices(self, symbols=None):
+        if self.th:
+            out = {}
+            for sym in (symbols or list(self.filters)):
+                d = self.public("/api/v3/ticker/24hr", {"symbol": sym})
+                out[sym] = float(d["lastPrice"])
+            return out
         if symbols:
             data = self.public("/api/v3/ticker/price", {"symbols": json.dumps(list(symbols), separators=(",", ":"))})
         else:
@@ -135,34 +167,48 @@ class Binance:
     def balances(self):
         if self.mode == "paper":
             return dict(self.paper)
-        acc = self._request("GET", "/api/v3/account", signed=True)
-        return {b["asset"]: float(b["free"]) for b in acc["balances"] if float(b["free"]) > 0}
+        acc = self.private("GET", "/api/v1/accountV2" if self.th else "/api/v3/account")
+        return {b["asset"]: float(b["free"]) for b in _find_balances(acc) if float(b.get("free", 0)) > 0}
 
     def usdt_free(self):
-        return self.balances().get("USDT", 0.0)
+        """เงินสดในสกุลที่ใช้เทรด (USDT สำหรับ binance.com, THB สำหรับ Binance TH)"""
+        return self.balances().get(self.quote, 0.0)
 
     # ------------------------------------------------------------ orders
     def market_buy(self, symbol, usdt):
-        """ซื้อด้วยจำนวน USDT คืนค่า (จำนวนเหรียญสุทธิหลังหักค่าธรรมเนียม, ราคาเฉลี่ย, order id)"""
+        """ซื้อด้วยเงินจำนวนหนึ่ง คืนค่า (จำนวนเหรียญสุทธิหลังหักค่าธรรมเนียม, ราคาเฉลี่ย, order id, เงินที่จ่ายจริง)"""
         f = self.filters[symbol]
         if self.mode == "paper":
             px = self.prices([symbol])[symbol]
-            if self.paper.get("USDT", 0) < usdt:
-                raise BinanceError("เงิน USDT จำลองไม่พอ")
+            if self.paper.get(self.quote, 0) < usdt:
+                raise BinanceError("เงิน %s จำลองไม่พอ" % self.quote)
             qty = _round_down(usdt / px * (1 - self.fee), f["step"])
-            self.paper["USDT"] -= usdt
+            self.paper[self.quote] -= usdt
             self.paper[f["base"]] = self.paper.get(f["base"], 0) + qty
             self._oid += 1
-            return qty, px, "paper-%d" % self._oid
-        usdt = math.floor(usdt * 100) / 100
-        r = self._request("POST", "/api/v3/order", {
-            "symbol": symbol, "side": "BUY", "type": "MARKET",
-            "quoteOrderQty": "%.2f" % usdt, "newOrderRespType": "FULL"}, signed=True)
-        qty = float(r["executedQty"])
-        spent = float(r["cummulativeQuoteQty"])
+            return qty, px, "paper-%d" % self._oid, usdt
+        if self.th:
+            # Binance TH ไม่รองรับ quoteOrderQty: คำนวณจำนวนเหรียญจากราคาล่าสุด เผื่อราคาขยับ 1%
+            px = self.prices([symbol])[symbol]
+            want = _round_down(usdt / px * 0.99, f["step"])
+            if want < f["min_qty"] or want * px < f["min_notional"]:
+                raise BinanceError("จำนวนเงินน้อยกว่าขั้นต่ำของ %s" % symbol)
+            r = self.private("POST", "/api/v3/order", {
+                "symbol": symbol, "side": "BUY", "type": "MARKET",
+                "quantity": self._fmt(want, f["step"]), "newOrderRespType": "FULL"})
+            r = _order_data(r)
+            qty = float(r.get("executedQty") or want)
+            spent = float(r.get("cummulativeQuoteQty") or qty * px)
+        else:
+            usdt = math.floor(usdt * 100) / 100
+            r = self.private("POST", "/api/v3/order", {
+                "symbol": symbol, "side": "BUY", "type": "MARKET",
+                "quoteOrderQty": "%.2f" % usdt, "newOrderRespType": "FULL"})
+            qty = float(r["executedQty"])
+            spent = float(r["cummulativeQuoteQty"])
         fee_in_base = sum(float(x["commission"]) for x in r.get("fills", []) if x["commissionAsset"] == f["base"])
         net = _round_down(qty - fee_in_base, f["step"])
-        return net, (spent / qty if qty else 0), str(r["orderId"])
+        return net, (spent / qty if qty else 0), str(r.get("orderId", "")), spent
 
     def market_sell(self, symbol, qty):
         f = self.filters[symbol]
@@ -173,14 +219,19 @@ class Binance:
             qty = min(qty, have)
             self.paper[f["base"]] = have - qty
             got = qty * px * (1 - self.fee)
-            self.paper["USDT"] = self.paper.get("USDT", 0) + got
+            self.paper[self.quote] = self.paper.get(self.quote, 0) + got
             return got, px
-        r = self._request("POST", "/api/v3/order", {
+        if self.th:  # ใช้ยอดคงเหลือจริง กันขายเกินที่มี (ค่าธรรมเนียมอาจถูกหักเป็นเหรียญ)
+            have = self.balances().get(f["base"], 0.0)
+            qty = _round_down(min(qty, have), f["step"])
+        r = _order_data(self.private("POST", "/api/v3/order", {
             "symbol": symbol, "side": "SELL", "type": "MARKET",
-            "quantity": self._fmt(qty, f["step"]), "newOrderRespType": "FULL"}, signed=True)
-        got = float(r["cummulativeQuoteQty"])
-        q = float(r["executedQty"]) or 1
-        fee_usdt = sum(float(x["commission"]) for x in r.get("fills", []) if x["commissionAsset"] == "USDT")
+            "quantity": self._fmt(qty, f["step"]), "newOrderRespType": "FULL"}))
+        q = float(r.get("executedQty") or qty) or 1
+        got = float(r.get("cummulativeQuoteQty") or 0)
+        if not got:
+            got = q * self.prices([symbol])[symbol]
+        fee_usdt = sum(float(x["commission"]) for x in r.get("fills", []) if x["commissionAsset"] == self.quote)
         return got - fee_usdt, got / q
 
     def place_oco_exit(self, symbol, qty, tp_price, sl_price):
@@ -224,9 +275,49 @@ class Binance:
             return
         self._request("DELETE", "/api/v3/orderList", {"symbol": symbol, "orderListId": list_id}, signed=True)
 
+    def check(self):
+        """ตรวจการเชื่อมต่อแบบไม่ส่งคำสั่งซื้อขาย"""
+        self.sync_time()
+        self.load_filters()
+        out = {"exchange": self.exchange, "mode": self.mode, "quote": self.quote, "symbols": len(self.filters)}
+        btc = "BTC" + self.quote
+        if btc in self.filters:
+            out["btc_price"] = self.prices([btc])[btc]
+            out["btc_filters"] = self.filters[btc]
+        if self.key and self.secret:  # มี key: ลองอ่านยอดเงินจริง (ไม่ซื้อขาย)
+            acc = self.private("GET", "/api/v1/accountV2" if self.th else "/api/v3/account")
+            bal = {b["asset"]: float(b["free"]) for b in _find_balances(acc) if float(b.get("free", 0)) > 0}
+            out["balance_" + self.quote] = bal.get(self.quote, 0.0)
+            out["assets"] = sorted(bal)[:20]
+        return out
+
     @staticmethod
     def _fmt(x, step):
         if step <= 0 or step >= 1:
             return ("%f" % x).rstrip("0").rstrip(".")
         d = max(0, -int(math.floor(math.log10(step))))
         return ("%.*f" % (d, x))
+
+
+def _find_balances(obj):
+    """หา list ของ {asset, free} ในคำตอบจาก API (รูปแบบของแต่ละกระดานต่างกัน)"""
+    if isinstance(obj, list) and obj and isinstance(obj[0], dict) and "asset" in obj[0]:
+        return obj
+    if isinstance(obj, dict):
+        for k in ("balances", "data", "result"):
+            if k in obj:
+                r = _find_balances(obj[k])
+                if r:
+                    return r
+        for v in obj.values():
+            r = _find_balances(v)
+            if r:
+                return r
+    return []
+
+
+def _order_data(r):
+    """บางกระดานห่อผลคำสั่งไว้ใน data"""
+    if isinstance(r, dict) and "executedQty" not in r and isinstance(r.get("data"), dict):
+        return r["data"]
+    return r

@@ -1,5 +1,6 @@
 {
   "mode": "paper",
+  "exchange": "binance_th",
   "risk": "mid",
   "paper_balance": 1000,
   "max_capital_usdt": 100,
@@ -10,5 +11,6 @@
   "loop_seconds": 30,
   "ai_enabled": true,
   "ai_model": "claude-haiku-5-5",
-  "ai_daily_budget_usd": 0.5
+  "ai_daily_budget_usd": 0.5,
+  "paper_balance_th": 30000
 }

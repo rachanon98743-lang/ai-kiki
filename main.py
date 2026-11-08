@@ -38,12 +38,16 @@ class Company:
         self.risk = cfg.get("risk", "mid")
         if self.risk not in RISK_PROFILES:
             sys.exit("risk ต้องเป็น low / mid / high")
-        self.acct = AccountingDept(os.path.join(HERE, "company_%s.db" % self.mode))
+        self.exchange = cfg.get("exchange", "binance")
+        tag = self.mode if self.exchange == "binance" else "%s_%s" % (self.exchange, self.mode)
+        self.acct = AccountingDept(os.path.join(HERE, "company_%s.db" % tag))
+        th = self.exchange == "binance_th"
         self.ex = Binance(self.mode, os.environ.get("BINANCE_API_KEY", ""), os.environ.get("BINANCE_API_SECRET", ""),
-                          fee=cfg.get("fee", 0.001), paper_balance=cfg.get("paper_balance", 1000))
+                          fee=cfg.get("fee", 0.001), exchange=self.exchange, quote=cfg.get("quote"),
+                          paper_balance=cfg.get("paper_balance_th", 30000) if th else cfg.get("paper_balance", 1000))
         if self.mode == "paper":
             saved = self.acct.get("paper_wallet")
-            if saved:
+            if saved and self.ex.quote in saved:
                 self.ex.paper = saved
         self.research = ResearchDept(self.ex, self.log)
         self.strategy = StrategyDept(self.log)
@@ -78,12 +82,15 @@ class Company:
             self.acct.set("paper_wallet", self.ex.paper)
 
     def start(self):
-        self.log("CEO", "เปิดบริษัท โหมด %s ความเสี่ยง%s" % (self.mode.upper(), RISK_PROFILES[self.risk]["name"]))
+        self.log("CEO", "เปิดบริษัท กระดาน %s (%s) โหมด %s ความเสี่ยง%s" % (
+            "Binance TH" if self.ex.th else "Binance.com", self.ex.quote, self.mode.upper(), RISK_PROFILES[self.risk]["name"]))
         self.ex.sync_time()
         self.ex.load_filters()
-        self.log("CEO", "โหลดข้อมูลเหรียญ USDT ที่เทรดได้ %d คู่" % len(self.ex.filters))
+        self.log("CEO", "โหลดข้อมูลเหรียญคู่ %s ที่เทรดได้ %d คู่" % (self.ex.quote, len(self.ex.filters)))
+        if not self.ex.filters:
+            raise BinanceError("ไม่พบเหรียญคู่ %s บนกระดานนี้ ลองตั้ง quote ใน config.json" % self.ex.quote)
         if self.mode != "paper":
-            self.log("CEO", "เงิน USDT ในบัญชี: %.2f" % self.ex.usdt_free())
+            self.log("CEO", "เงิน %s ในบัญชี: %.2f" % (self.ex.quote, self.ex.usdt_free()))
         self.status = "running"
 
     def cycle(self):
@@ -148,7 +155,7 @@ class Company:
 def confirm_live(cfg):
     print("\n" + "=" * 60)
     print("⚠️  โหมด LIVE: บอทจะซื้อขายด้วยเงินจริงในบัญชี Binance ของคุณ")
-    print("   ใช้ทุนไม่เกิน %.0f USDT, ขาดทุนต่อวันเกิน %s%% จะหยุดเปิดไม้ใหม่" % (
+    print("   ใช้ทุนไม่เกิน %.0f (สกุลเงินที่เทรด), ขาดทุนต่อวันเกิน %s%% จะหยุดเปิดไม้ใหม่" % (
         cfg.get("max_capital_usdt", 100), cfg.get("max_daily_loss_pct", 5)))
     print("   ขาดทุนได้จริง ไม่มีอะไรรับประกันกำไร")
     print("=" * 60)
@@ -170,6 +177,8 @@ def main():
     ap.add_argument("--mode", choices=["paper", "testnet", "live"])
     ap.add_argument("--risk", choices=list(RISK_PROFILES))
     ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--check", action="store_true", help="ตรวจการเชื่อมต่อกระดานและยอดเงิน โดยไม่ซื้อขาย")
+    ap.add_argument("--exchange", choices=["binance", "binance_th"])
     ap.add_argument("--host", default="127.0.0.1", help="0.0.0.0 = เปิดให้เครื่องอื่นเข้าได้ (ต้องตั้ง DASHBOARD_PASSWORD)")
     a = ap.parse_args()
     cfg = load_config(a.config)
@@ -178,6 +187,17 @@ def main():
         cfg["mode"] = a.mode
     if a.risk:
         cfg["risk"] = a.risk
+    if a.exchange:
+        cfg["exchange"] = a.exchange
+    if a.check:
+        try:
+            ex = Binance(cfg["mode"], os.environ.get("BINANCE_API_KEY", ""), os.environ.get("BINANCE_API_SECRET", ""),
+                         exchange=cfg.get("exchange", "binance"), quote=cfg.get("quote"))
+            print(json.dumps(ex.check(), ensure_ascii=False, indent=2))
+            print("✅ เชื่อมต่อได้")
+        except Exception as e:
+            print("❌ ผิดพลาด:", e)
+        return
     if cfg["mode"] == "live":
         confirm_live(cfg)
     co = Company(cfg)

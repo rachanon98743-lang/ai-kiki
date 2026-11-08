@@ -18,7 +18,7 @@ import urllib.request
 from datetime import datetime, timezone, timedelta
 
 TH = timezone(timedelta(hours=7))
-STABLE = {"USDC", "FDUSD", "TUSD", "BUSD", "DAI", "USDP", "USDD", "PYUSD", "EUR", "EURI", "AEUR",
+STABLE = {"USDT", "USDC", "FDUSD", "TUSD", "BUSD", "DAI", "USDP", "USDD", "PYUSD", "EUR", "EURI", "AEUR",
           "TRY", "BRL", "GBP", "USD1", "XUSD", "BFUSD", "RLUSD", "USDE", "WBTC", "WBETH", "BNSOL"}
 
 RISK_PROFILES = {
@@ -83,7 +83,7 @@ class ResearchDept:
 
     def market_regime(self):
         """ดูภาวะตลาดรวมจาก BTC รายวัน: bull / neutral / bear"""
-        k = self.ex.klines("BTCUSDT", "1d", 220)
+        k = self.ex.klines("BTC" + self.ex.quote, "1d", 220)
         c = [float(x[4]) for x in k]
         m50, m200 = sma(c, 50)[-1], sma(c, 200)[-1]
         if c[-1] > m50 > m200:
@@ -137,6 +137,10 @@ class ResearchDept:
     def scan(self, risk):
         cfg = RISK_PROFILES[risk]
         tick = self.ex.tickers_24h()
+        # Binance TH วอลุ่มเล็กกว่า binance.com มาก: ใช้การจัดอันดับวอลุ่มแทนเกณฑ์ขั้นต่ำ
+        th = getattr(self.ex, "th", False)
+        min_vol = 0 if th else cfg["min_vol_m"]
+        max_coins = {"low": 10, "mid": 25, "high": 50}[risk] if th else cfg["max_coins"]
         cands = []
         for t in tick:
             s = t["symbol"]
@@ -146,10 +150,10 @@ class ResearchDept:
             if base in STABLE or base.endswith(("UP", "DOWN", "BULL", "BEAR")):
                 continue
             vol_m = float(t["quoteVolume"]) / 1e6
-            if vol_m >= cfg["min_vol_m"] and float(t["lastPrice"]) > 0:
+            if vol_m >= min_vol and float(t["lastPrice"]) > 0:
                 cands.append((vol_m, s, float(t["priceChangePercent"])))
         cands.sort(reverse=True)
-        cands = cands[:cfg["max_coins"]]
+        cands = cands[:max_coins]
         results = []
         for vol_m, s, chg in cands:
             try:
@@ -306,15 +310,15 @@ class RiskDept:
             amt = capital * cfg["size"] * size_mult
             room = capital * (1 - self.reserve) - used
             amt = min(amt, room, usdt_free * 0.99)
-            if amt < filters[p["symbol"]]["min_notional"] * 1.2 or amt < 6:
-                self.log(self.name, "ไม่อนุมัติ %s: เงินไม่พอขั้นต่ำ (%.2f USDT)" % (p["symbol"], amt))
+            if amt < filters[p["symbol"]]["min_notional"] * 1.2:
+                self.log(self.name, "ไม่อนุมัติ %s: เงินไม่พอขั้นต่ำ (%.2f)" % (p["symbol"], amt))
                 break
             orders.append(dict(p, usdt=round(amt, 2)))
             used += amt
             usdt_free -= amt
             slots -= 1
         if orders:
-            self.log(self.name, "อนุมัติ %d คำสั่ง (ตลาด %s, ใช้ทุนสูงสุด %.0f USDT)" % (len(orders), regime, capital))
+            self.log(self.name, "อนุมัติ %d คำสั่ง (ตลาด %s, ใช้ทุนสูงสุด %.0f)" % (len(orders), regime, capital))
         return orders
 
 
@@ -327,7 +331,7 @@ class ExecutionDept:
 
     def buy(self, o, risk):
         s = o["symbol"]
-        qty, px, oid = self.ex.market_buy(s, o["usdt"])
+        qty, px, oid, spent = self.ex.market_buy(s, o["usdt"])
         if qty <= 0:
             raise RuntimeError("ซื้อได้ 0 เหรียญ")
         sl, tp = px * (1 - o["sl_pct"]), px * (1 + o["tp_pct"])
@@ -336,9 +340,9 @@ class ExecutionDept:
             oco = self.ex.place_oco_exit(s, qty, tp, sl)
         except Exception as e:
             self.log(self.name, "ตั้ง OCO บนกระดานไม่สำเร็จ (%s) จะเฝ้าราคาเองแทน" % e)
-        pid = self.acct.open_position(s, qty, px, o["usdt"], sl, tp, oco, risk, "; ".join(o["why"]))
-        self.log(self.name, "ซื้อ %s %.6g @ %.6g ใช้ %.2f USDT | SL %.6g TP %.6g %s" % (
-            s, qty, px, o["usdt"], sl, tp, "(OCO บนกระดาน)" if oco else "(เฝ้าเอง)"))
+        pid = self.acct.open_position(s, qty, px, spent, sl, tp, oco, risk, "; ".join(o["why"]))
+        self.log(self.name, "ซื้อ %s %.6g @ %.6g ใช้ %.2f | SL %.6g TP %.6g %s" % (
+            s, qty, px, spent, sl, tp, "(OCO บนกระดาน)" if oco else "(เฝ้าเอง)"))
         return pid
 
     def monitor(self):
@@ -354,7 +358,7 @@ class ExecutionDept:
                         got, exit_px, typ = self.ex.oco_fill(p["oco_id"])
                         reason = "ทำกำไร" if "LIMIT_MAKER" in typ else "ตัดขาดทุน"
                         self.acct.close_position(p["id"], exit_px, got, reason)
-                        self.log(self.name, "%s %s @ %.6g ได้ %.2f USDT" % (reason, s, exit_px, got))
+                        self.log(self.name, "%s %s @ %.6g ได้ %.2f" % (reason, s, exit_px, got))
                 except Exception as e:
                     self.log(self.name, "เช็ก OCO %s ไม่ได้: %s" % (s, e))
                 continue
@@ -372,7 +376,7 @@ class ExecutionDept:
                 self.log(self.name, "ยกเลิก OCO ไม่ได้ (%s)" % e)
         got, px = self.ex.market_sell(p["symbol"], p["qty"])
         self.acct.close_position(p["id"], px, got, reason)
-        self.log(self.name, "%s %s @ %.6g ได้ %.2f USDT" % (reason, p["symbol"], px, got))
+        self.log(self.name, "%s %s @ %.6g ได้ %.2f" % (reason, p["symbol"], px, got))
 
 
 # ===================================================================== 6. Accounting

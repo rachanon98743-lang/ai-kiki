@@ -11,10 +11,11 @@ setvar(){ # setvar KEY VALUE
   echo "$1=$2" >> "$ENV.tmp"; mv "$ENV.tmp" "$ENV"; chmod 600 "$ENV"
 }
 mode(){ grep -o -- '--mode [a-z]*' "$SVC" | awk '{print $2}'; }
+exch(){ python3 -c "import json;print(json.load(open('$DIR/config.json',encoding='utf-8')).get('exchange','binance'))"; }
 
 while true; do
   echo
-  echo "=== AI Trading Company | โหมดตอนนี้: $(mode) | สถานะ: $(systemctl is-active tradingbot) ==="
+  echo "=== AI Trading Company | กระดาน: $(exch) | โหมด: $(mode) | สถานะ: $(systemctl is-active tradingbot) ==="
   echo " 1) ใส่ Binance API key"
   echo " 2) ใส่ Claude (Anthropic) API key"
   echo " 3) เปลี่ยนโหมด: paper / testnet / live"
@@ -23,6 +24,8 @@ while true; do
   echo " 6) รีสตาร์ทบอท"
   echo " 7) อัปเดตบอทเป็นเวอร์ชันล่าสุด"
   echo " 8) เปลี่ยนรหัสผ่านแดชบอร์ด"
+  echo " 9) เลือกกระดาน: binance_th (บัญชีไทย) / binance (binance.com)"
+  echo "10) ตรวจการเชื่อมต่อกระดานและยอดเงิน (ไม่ซื้อขาย)"
   echo " 0) ออก"
   read -r -p "เลือก: " c
   case "$c" in
@@ -36,7 +39,7 @@ while true; do
          paper|testnet) ;;
          live)
            echo "⚠️  เงินจริง: บอทจะซื้อขายในบัญชี Binance ของคุณ ขาดทุนได้จริง"
-           read -r -p "เพดานทุนที่ให้บอทใช้ (USDT): " cap
+           read -r -p "เพดานทุนที่ให้บอทใช้ (หน่วยเป็นเงินที่เทรด: THB สำหรับ binance_th, USDT สำหรับ binance): " cap
            read -r -p 'พิมพ์ "ยืนยันเงินจริง" เพื่อยืนยัน: ' ok
            [ "$ok" = "ยืนยันเงินจริง" ] || { echo "ยกเลิก"; continue; }
            python3 - "$DIR/config.json" "$cap" <<'PY'
@@ -70,6 +73,18 @@ PY
     8) read -r -p "รหัสใหม่ (อย่างน้อย 10 ตัว): " p
        [ ${#p} -ge 10 ] || { echo "สั้นเกินไป"; continue; }
        setvar DASHBOARD_PASSWORD "$p"; systemctl restart tradingbot; echo "เปลี่ยนแล้ว" ;;
+    9) read -r -p "กระดาน (binance_th/binance): " e
+       case "$e" in binance_th|binance)
+         python3 - "$DIR/config.json" "$e" <<'PY'
+import json,sys
+p,e=sys.argv[1],sys.argv[2]
+c=json.load(open(p,encoding="utf-8")); c["exchange"]=e
+json.dump(c,open(p,"w",encoding="utf-8"),ensure_ascii=False,indent=2)
+PY
+         [ "$e" = binance_th ] && [ "$(mode)" = testnet ] && sed -i "s/--mode [a-z]*/--mode paper/" "$SVC" && systemctl daemon-reload
+         systemctl restart tradingbot; echo "เปลี่ยนเป็น $e แล้ว" ;;
+       *) echo "ไม่ถูกต้อง" ;; esac ;;
+    10) ( set -a; . "$ENV"; set +a; cd "$DIR" && python3 main.py --check --mode "$(mode)" ) ;;
     0) exit 0 ;;
   esac
 done

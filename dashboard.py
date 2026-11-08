@@ -30,7 +30,7 @@ button{padding:8px 14px;border-radius:8px;border:1px solid #30363d;background:#2
 <h1>🏢 AI Trading Company <span id="mode"></span> <a href="/logout" style="float:right;font-size:13px;color:#8b949e">ออกจากระบบ</a></h1>
 <div class="card org" id="org"></div>
 <div class="card"><div class="grid">
-<div class="s"><span>มูลค่าพอร์ต (USDT)</span><b id="eq">-</b></div>
+<div class="s"><span>มูลค่าพอร์ต (<span id="q">USDT</span>)</span><b id="eq">-</b></div>
 <div class="s"><span>กำไรที่ปิดแล้ว</span><b id="pnl">-</b></div>
 <div class="s"><span>ชนะ / ทั้งหมด</span><b id="wr">-</b></div>
 <div class="s"><span>ภาวะตลาด</span><b id="reg">-</b></div>
@@ -45,9 +45,9 @@ const f=(n,d=2)=>Number(n).toLocaleString('en-US',{maximumFractionDigits:d,minim
 const c=v=>v>0?'g':v<0?'r':'m';const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));
 async function load(){try{const res=await fetch('/api/status');if(res.status===401){location.reload();return;}const d=await res.json();
-$('mode').innerHTML=d.mode==='live'?'<span class="live">เงินจริง</span>':'<span class="m">'+d.mode+'</span>';
+$('mode').innerHTML=d.mode.startsWith('live')?'<span class="live">เงินจริง'+d.mode.slice(4)+'</span>':'<span class="m">'+esc(d.mode)+'</span>';
 $('org').innerHTML=d.org.map(o=>'<div>'+o+'</div>').join('');
-$('eq').textContent=f(d.equity);$('pnl').innerHTML='<span class="'+c(d.summary.realized_pnl)+'">'+f(d.summary.realized_pnl)+'</span>';
+$('eq').textContent=f(d.equity);$('q').textContent=d.quote||'USDT';$('pnl').innerHTML='<span class="'+c(d.summary.realized_pnl)+'">'+f(d.summary.realized_pnl)+'</span>';
 $('wr').textContent=d.summary.wins+' / '+d.summary.trades+' ('+d.summary.win_rate+'%)';$('reg').textContent=d.regime;
 $('ai').textContent='$'+f(d.ai_cost,4);$('stopTxt').textContent=d.stopped?'หยุดเปิดไม้ใหม่อยู่ (ไม้เดิมยังถูกเฝ้า)':'';
 $('stop').textContent=d.stopped?'▶ กลับมาเปิดไม้ใหม่':'⏸ หยุดเปิดไม้ใหม่';
@@ -135,7 +135,7 @@ def serve(company, port, host="127.0.0.1"):
                 except Exception:
                     eq = 0
                 data = {
-                    "mode": co.mode, "risk": RISK_PROFILES[co.risk]["name"], "regime": co.regime,
+                    "mode": co.mode + (" · Binance TH" if co.ex.th else ""), "quote": co.ex.quote, "risk": RISK_PROFILES[co.risk]["name"], "regime": co.regime,
                     "equity": eq, "summary": co.acct.summary(), "ai_cost": co.acct.ai_cost_today(),
                     "positions": co.acct.open_positions(), "closed": co.acct.closed_positions(50),
                     "research": co.last_research[:30], "logs": co.acct.recent_logs(80),
