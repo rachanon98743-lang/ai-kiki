@@ -20,7 +20,7 @@ import traceback
 
 from binance_client import Binance, BinanceError
 from departments import (RISK_PROFILES, AccountingDept, AIAnalystDept, ExecutionDept, ResearchDept,
-                         RiskDept, StrategyDept, now_th)
+                         RiskDept, StrategyDept, liquidity_check, now_th)
 import dashboard
 from notifier import LineNotifier
 import line_bot
@@ -51,7 +51,7 @@ class Company:
             saved = self.acct.get("paper_wallet")
             if saved and self.ex.quote in saved:
                 self.ex.paper = saved
-        self.research = ResearchDept(self.ex, self.log)
+        self.research = ResearchDept(self.ex, self.log, cfg)
         self.strategy = StrategyDept(self.log)
         self.ai = AIAnalystDept(cfg, self.acct, self.log)
         self.riskd = RiskDept(cfg, self.acct, self.log)
@@ -139,7 +139,15 @@ class Company:
         props = self.ai.review(props, self.regime)
         orders = self.riskd.approve(props, self.risk, self.regime, self.acct.open_positions(),
                                     self.ex.usdt_free(), eq, self.ex.filters)
+        max_spread = float(self.cfg.get("max_spread_pct", 0.5)) / 100
+        max_slip = float(self.cfg.get("max_slippage_pct", 0.5)) / 100
         for o in orders:
+            ok, why = liquidity_check(self.ex, o["symbol"], o["usdt"], max_spread, max_slip,
+                                      self.research.tickers.get(o["symbol"]))
+            if not ok:
+                self.log("ฝ่ายบริหารความเสี่ยง", "ไม่ซื้อ %s: %s" % (o["symbol"], why))
+                continue
+            self.log("ฝ่ายบริหารความเสี่ยง", "สภาพคล่อง %s ผ่าน (%s)" % (o["symbol"], why))
             try:
                 self.exe.buy(o, self.risk)
             except Exception as e:

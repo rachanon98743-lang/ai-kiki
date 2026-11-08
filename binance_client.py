@@ -147,6 +147,14 @@ class Binance:
             time.sleep(0.05)
         return out
 
+    def order_book(self, symbol, limit=20):
+        """สมุดคำสั่งซื้อขาย: คืน (bids, asks) เป็นลิสต์ [(ราคา, จำนวน)] เรียงจากราคาดีสุด"""
+        d = self.public("/api/v3/depth", {"symbol": symbol, "limit": limit})
+        d = d.get("data", d) if isinstance(d, dict) else d
+        conv = lambda rows: [(float(r[0]), float(r[1])) if isinstance(r, (list, tuple))
+                             else (float(r["price"]), float(r.get("qty", r.get("quantity", 0)))) for r in rows]
+        return conv(d.get("bids", [])), conv(d.get("asks", []))
+
     def klines(self, symbol, interval, limit=250):
         return self.public("/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": limit})
 
@@ -284,6 +292,11 @@ class Binance:
         if btc in self.filters:
             out["btc_price"] = self.prices([btc])[btc]
             out["btc_filters"] = self.filters[btc]
+            try:
+                bids, asks = self.order_book(btc, 5)
+                out["order_book"] = "ใช้ได้ (spread %.3f%%)" % ((asks[0][0] / bids[0][0] - 1) * 100)
+            except Exception as e:
+                out["order_book"] = "ใช้ไม่ได้: %s" % e
         if self.key and self.secret:  # มี key: ลองอ่านยอดเงินจริง (ไม่ซื้อขาย)
             acc = self.private("GET", "/api/v1/accountV2" if self.th else "/api/v3/account")
             bal = {b["asset"]: float(b["free"]) for b in _find_balances(acc) if float(b.get("free", 0)) > 0}

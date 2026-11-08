@@ -26,6 +26,46 @@ RISK_PROFILES = {
     "mid":  {"name": "กลาง", "tf": "1h",  "min_vol_m": 20,  "max_coins": 50, "size": 0.15, "sl": 0.05, "tp": 0.10, "max_pos": 5, "min_score": 70, "every_min": 15},
     "high": {"name": "สูง",  "tf": "15m", "min_vol_m": 3,   "max_coins": 80, "size": 0.20, "sl": 0.08, "tp": 0.20, "max_pos": 5, "min_score": 65, "every_min": 5},
 }
+# Binance TH: วอลุ่มซื้อขายขั้นต่ำต่อวัน (ล้านบาท) เหรียญที่ต่ำกว่านี้ไม่สแกนเลย (แก้ได้ด้วย th_min_vol_m ใน config.json)
+TH_MIN_VOL_M = {"low": 10, "mid": 3, "high": 1}
+
+
+def liquidity_check(ex, symbol, amount, max_spread=0.005, max_slip=0.005, ticker=None):
+    """ตรวจสภาพคล่องก่อนซื้อ คืน (ผ่านไหม, ข้อความ)
+    - spread: ราคาเสนอซื้อกับเสนอขายห่างกันเกิน max_spread = ไม่ซื้อ
+    - slippage: ถ้าซื้อจำนวนนี้จริง ราคาเฉลี่ยจะแพงกว่าราคาเสนอขายดีสุดเกิน max_slip = ไม่ซื้อ"""
+    try:
+        bids, asks = ex.order_book(symbol, 50)
+    except Exception as e:
+        bids = asks = None
+        book_err = e
+    if bids and asks:
+        bid, ask = bids[0][0], asks[0][0]
+        spread = ask / bid - 1 if bid > 0 else 1
+        if spread > max_spread:
+            return False, "ส่วนต่างราคาซื้อขาย %.2f%% เกิน %.2f%%" % (spread * 100, max_spread * 100)
+        left, cost, qty = amount, 0.0, 0.0
+        for px, q in asks:
+            take = min(left, px * q)
+            cost += take
+            qty += take / px
+            left -= take
+            if left <= 1e-9:
+                break
+        if left > 1e-9:
+            return False, "คำสั่งขายบนกระดานไม่พอให้ซื้อ %.2f (ขาด %.2f)" % (amount, left)
+        slip = (cost / qty) / ask - 1
+        if slip > max_slip:
+            return False, "ซื้อจำนวนนี้จะแพงขึ้น %.2f%% เกิน %.2f%%" % (slip * 100, max_slip * 100)
+        return True, "spread %.2f%% slippage %.2f%%" % (spread * 100, slip * 100)
+    # ดึงสมุดคำสั่งไม่ได้: ใช้ราคาเสนอซื้อ/ขายจาก ticker แทน
+    bid, ask = (float((ticker or {}).get(k) or 0) for k in ("bidPrice", "askPrice"))
+    if bid > 0 and ask > 0:
+        spread = ask / bid - 1
+        if spread > max_spread:
+            return False, "ส่วนต่างราคาซื้อขาย %.2f%% เกิน %.2f%%" % (spread * 100, max_spread * 100)
+        return True, "spread %.2f%% (ไม่มีข้อมูลสมุดคำสั่ง)" % (spread * 100)
+    return True, "ตรวจ spread ไม่ได้ (%s) ใช้ตัวกรองวอลุ่มอย่างเดียว" % (book_err if bids is None else "ไม่มีข้อมูล")
 
 
 def now_th():
@@ -78,8 +118,9 @@ def atr_pct(h, lo, c, n=14):
 class ResearchDept:
     name = "ฝ่ายวิจัยตลาด"
 
-    def __init__(self, ex, log):
-        self.ex, self.log = ex, log
+    def __init__(self, ex, log, cfg=None):
+        self.ex, self.log, self.cfg = ex, log, cfg or {}
+        self.tickers = {}
 
     def market_regime(self):
         """ดูภาวะตลาดรวมจาก BTC รายวัน: bull / neutral / bear"""
@@ -139,9 +180,15 @@ class ResearchDept:
         tick = self.ex.tickers_24h()
         # Binance TH วอลุ่มเล็กกว่า binance.com มาก: ใช้การจัดอันดับวอลุ่มแทนเกณฑ์ขั้นต่ำ
         th = getattr(self.ex, "th", False)
-        min_vol = 0 if th else cfg["min_vol_m"]
+        if th:
+            over = self.cfg.get("th_min_vol_m")
+            min_vol = float(over[risk] if isinstance(over, dict) else over) if over is not None else TH_MIN_VOL_M[risk]
+        else:
+            min_vol = cfg["min_vol_m"]
         max_coins = {"low": 10, "mid": 25, "high": 50}[risk] if th else cfg["max_coins"]
-        cands = []
+        max_spread = float(self.cfg.get("max_spread_pct", 0.5)) / 100
+        cands, low_vol, wide = [], 0, 0
+        self.tickers = {}
         for t in tick:
             s = t["symbol"]
             if s not in self.ex.filters:
@@ -150,10 +197,22 @@ class ResearchDept:
             if base in STABLE or base.endswith(("UP", "DOWN", "BULL", "BEAR")):
                 continue
             vol_m = float(t["quoteVolume"]) / 1e6
-            if vol_m >= min_vol and float(t["lastPrice"]) > 0:
-                cands.append((vol_m, s, float(t["priceChangePercent"])))
+            if float(t["lastPrice"]) <= 0:
+                continue
+            if vol_m < min_vol:
+                low_vol += 1
+                continue
+            bid, ask = float(t.get("bidPrice") or 0), float(t.get("askPrice") or 0)
+            if bid > 0 and ask > 0 and ask / bid - 1 > max_spread:
+                wide += 1
+                continue
+            self.tickers[s] = t
+            cands.append((vol_m, s, float(t["priceChangePercent"])))
         cands.sort(reverse=True)
         cands = cands[:max_coins]
+        if low_vol or wide:
+            self.log(self.name, "ตัดทิ้ง: วอลุ่มต่ำกว่า %g ล้าน%s %d เหรียญ, spread กว้างเกิน %.2f%% %d เหรียญ" % (
+                min_vol, "บาท" if th else "$", low_vol, max_spread * 100, wide))
         results = []
         for vol_m, s, chg in cands:
             try:
